@@ -1,32 +1,51 @@
 const STORAGE_KEY = "rift-ledger-v1";
 
-const demoState = {
+const initialState = {
   settings: { leagueName: "SID CUSTOMI", season: 1, kFactor: 32 },
-  players: [
-    { id: "p1", name: "BaronBoi", color: "gold", elo: 1084, wins: 6, losses: 2, form: ["W", "W", "L", "W", "W"] },
-    { id: "p2", name: "PixelGank", color: "mint", elo: 1058, wins: 5, losses: 3, form: ["W", "L", "W", "W", "L"] },
-    { id: "p3", name: "NoMana", color: "violet", elo: 1021, wins: 4, losses: 4, form: ["L", "W", "W", "L", "W"] },
-    { id: "p4", name: "WardEnjoyer", color: "blue", elo: 987, wins: 3, losses: 5, form: ["W", "L", "L", "W", "L"] },
-    { id: "p5", name: "TiltProof", color: "rose", elo: 950, wins: 2, losses: 6, form: ["L", "L", "W", "L", "L"] }
-  ],
-  matches: [
-    { id: "m3", date: "2026-10-25T20:45:00.000Z", blue: ["p1", "p3"], red: ["p2", "p4"], winner: "blue", delta: 15 },
-    { id: "m2", date: "2026-10-23T19:20:00.000Z", blue: ["p2", "p5"], red: ["p1", "p3"], winner: "red", delta: 13 },
-    { id: "m1", date: "2026-10-20T21:05:00.000Z", blue: ["p3", "p4"], red: ["p2", "p5"], winner: "blue", delta: 17 }
-  ]
+  players: [],
+  matches: []
 };
 
+const LEGACY_DEMO_PLAYERS = new Map([
+  ["p1", "BaronBoi"],
+  ["p2", "PixelGank"],
+  ["p3", "NoMana"],
+  ["p4", "WardEnjoyer"],
+  ["p5", "TiltProof"],
+]);
+const LEGACY_DEMO_MATCHES = new Set(["m1", "m2", "m3"]);
+
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
+function removeLegacyDemoData(value) {
+  const restored = { ...clone(initialState), ...(value || {}) };
+  restored.settings = { ...clone(initialState.settings), ...(value?.settings || {}) };
+  const storedPlayers = Array.isArray(restored.players) ? restored.players : [];
+  const storedMatches = Array.isArray(restored.matches) ? restored.matches : [];
+  const removedPlayerIds = new Set(
+    storedPlayers
+      .filter((player) => LEGACY_DEMO_PLAYERS.get(player.id) === player.name)
+      .map((player) => player.id),
+  );
+  const players = storedPlayers.filter((player) => !removedPlayerIds.has(player.id));
+  const matches = storedMatches.filter((match) => {
+    if (LEGACY_DEMO_MATCHES.has(match.id)) return false;
+    return ![...(match.blue || []), ...(match.red || [])].some((playerId) => removedPlayerIds.has(playerId));
+  });
+  const changed = players.length !== storedPlayers.length || matches.length !== storedMatches.length;
+  return { state: { ...restored, players, matches }, changed };
+}
 function loadState() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
-      const restored = { ...clone(demoState), ...JSON.parse(saved) };
+      const cleaned = removeLegacyDemoData(JSON.parse(saved));
+      const restored = cleaned.state;
       if (restored.settings?.leagueName === "Rift Ledger") restored.settings.leagueName = "SID CUSTOMI";
+      if (cleaned.changed) localStorage.setItem(STORAGE_KEY, JSON.stringify(restored));
       return restored;
     }
   } catch (error) { console.warn("Could not read saved league", error); }
-  return clone(demoState);
+  return clone(initialState);
 }
 
 let state = loadState();
@@ -82,10 +101,13 @@ async function hydrateFromCloud() {
     if (!response.ok) throw new Error(`Load failed (${response.status})`);
     const payload = await response.json();
     if (payload.state?.players && payload.state?.matches) {
-      state = payload.state;
+      const cleaned = removeLegacyDemoData(payload.state);
+      state = cleaned.state;
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       render();
-      setSyncState("Cloud saved");
+      cloudHydrated = true;
+      if (cleaned.changed) await persistStateToCloud();
+      else setSyncState("Cloud saved");
     } else {
       cloudHydrated = true;
       await persistStateToCloud();
