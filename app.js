@@ -49,10 +49,11 @@ function loadState() {
 }
 
 let state = loadState();
-let visibleMatchCount = 4;
 let toastTimer;
 let editingMatchId = null;
 let playerSearchQuery = "";
+let matchSearchQuery = "";
+let matchSourceFilter = "all";
 let cloudHydrated = false;
 let cloudSaveTimer;
 let pendingReplay = null;
@@ -60,6 +61,8 @@ let championCatalogPromise = null;
 
 const DATA_DRAGON_ROOT = "https://ddragon.leagueoflegends.com";
 const DATA_DRAGON_FALLBACK_VERSION = "16.21.1";
+
+if ("scrollRestoration" in history) history.scrollRestoration = "manual";
 
 const $ = (selector) => document.querySelector(selector);
 const byId = (id) => document.getElementById(id);
@@ -140,7 +143,6 @@ function openDialog(id) {
 function games(player) { return player.wins + player.losses; }
 function winRate(player) { return games(player) ? Math.round((player.wins / games(player)) * 100) : 0; }
 function playerById(id) { return state.players.find((player) => player.id === id); }
-function playerNames(ids) { return ids.map((id) => playerById(id)?.name).filter(Boolean).join(", "); }
 function averageElo(ids) {
   const selected = ids.map(playerById).filter(Boolean);
   return selected.length ? Math.round(selected.reduce((sum, player) => sum + player.elo, 0) / selected.length) : null;
@@ -258,6 +260,28 @@ function calculateMatchDelta(blue, red, winner) {
   return Math.max(1, Math.round(state.settings.kFactor * Math.abs(actualBlue - expectedBlue)));
 }
 
+function applyPerformanceElo(match) {
+  if (!match.replayStats?.length || !globalThis.SidPerformanceElo?.calculatePerformanceElo) return match;
+  const performance = globalThis.SidPerformanceElo.calculatePerformanceElo({
+    stats: match.replayStats,
+    baseDelta: match.delta,
+    winner: match.winner,
+  });
+  return { ...match, ...performance, eloModel: "performance-v1" };
+}
+
+function playerMatchDelta(match, playerId) {
+  const individual = Number(match.playerDeltas?.[playerId]);
+  if (Number.isFinite(individual)) return individual;
+  const winningIds = match.winner === "blue" ? match.blue : match.red;
+  return winningIds.includes(playerId) ? Number(match.delta) || 0 : -(Number(match.delta) || 0);
+}
+
+function formatSignedElo(value) {
+  const delta = Number(value) || 0;
+  return `${delta >= 0 ? "+" : "−"}${Math.abs(delta)}`;
+}
+
 function renderStats(sorted) {
   const leader = sorted[0];
   const formLeader = [...state.players].sort((a, b) => {
@@ -316,27 +340,97 @@ function renderChampionPanel(championUsage) {
   empty.hidden = topChampions.length > 0;
 }
 
+function matchRosterMarkup(match, side) {
+  const replayStats = match.replayStats || [];
+  return (match[side] || []).map((playerId) => {
+    const player = playerById(playerId);
+    const stat = replayStats.find((entry) => entry.trackerPlayerId === playerId && entry.side === side);
+    const eloDelta = playerMatchDelta(match, playerId);
+    const modifier = Number(match.performanceModifiers?.[playerId]) || 0;
+    const visual = stat?.champion
+      ? championIconMarkup(stat.champion, "small")
+      : `<span class="avatar roster-avatar ${escapeHtml(player?.color || "mint")}">${escapeHtml(initials(player?.name || "?"))}</span>`;
+    return `<span class="roster-player">
+      ${visual}
+      <span><strong>${escapeHtml(player?.name || stat?.displayName || "Unknown player")}</strong><small class="roster-meta">${stat?.champion ? `<span data-champion-label="${escapeHtml(stat.champion)}">${escapeHtml(stat.champion)}</span>` : ""}<em class="roster-delta ${eloDelta >= 0 ? "positive" : "negative"}" title="${match.eloModel === "performance-v1" ? `Performance adjustment ${formatSignedElo(modifier)}` : "Team result Elo"}">${formatSignedElo(eloDelta)} Elo</em></small></span>
+    </span>`;
+  }).join("");
+}
+
+function matchSearchText(match) {
+  const players = [...(match.blue || []), ...(match.red || [])]
+    .map((id) => playerById(id))
+    .flatMap((player) => [player?.name, player?.riotId]);
+  const champions = (match.replayStats || []).map((stat) => stat.champion);
+  return [match.id, match.gameId, match.gameVersion, ...players, ...champions].filter(Boolean).join(" ").toLowerCase();
+}
+
+function renderHistoryOverview() {
+  const replayMatches = state.matches.filter((match) => match.source === "rofl");
+  const biggestSwing = state.matches.reduce((largest, match) => {
+    const individualDeltas = Object.values(match.playerDeltas || {}).map((value) => Math.abs(Number(value) || 0));
+    return Math.max(largest, Number(match.delta) || 0, ...individualDeltas);
+  }, 0);
+  const latestDate = state.matches[0]?.date ? new Date(state.matches[0].date) : null;
+  byId("historyTotal").textContent = state.matches.length;
+  byId("historyReplays").textContent = replayMatches.length;
+  byId("historyBiggestSwing").textContent = biggestSwing ? `±${biggestSwing}` : "—";
+  byId("historyLastPlayed").textContent = latestDate ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(latestDate) : "—";
+  byId("historyLastPlayedMeta").textContent = latestDate ? new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(latestDate) : "No matches yet";
+}
+
 function renderHistory() {
   const list = byId("matchHistory");
   const empty = byId("matchesEmpty");
-  const matches = state.matches.slice(0, visibleMatchCount);
-  list.innerHTML = matches.map((match, index) => {
+  const matches = state.matches.filter((match) => {
+    const source = match.source === "rofl" ? "rofl" : "manual";
+    const sourceMatches = matchSourceFilter === "all" || matchSourceFilter === source;
+    const queryMatches = !matchSearchQuery || matchSearchText(match).includes(matchSearchQuery);
+    return sourceMatches && queryMatches;
+  });
+  renderHistoryOverview();
+  list.innerHTML = matches.map((match) => {
+    const matchIndex = state.matches.indexOf(match);
+    const gameNumber = state.matches.length - matchIndex;
     const blueWon = match.winner === "blue";
-    const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(match.date));
-    const replayLabel = match.source === "rofl" ? " · Replay" : "";
-    return `<article class="match-item clickable" data-edit-match="${escapeHtml(match.id)}" role="button" tabindex="0" aria-label="Edit game ${state.matches.length - index}">
-      <div class="match-meta"><span>Game ${String(state.matches.length - index).padStart(2, "0")}${replayLabel}${match.updatedAt ? " · Edited" : ""}</span><time>${escapeHtml(date)}</time></div>
-      <div class="match-result">
-        <div class="team-names"><strong>${escapeHtml(playerNames(match.blue)) || "Unknown"}</strong><small>${blueWon ? "+" : "−"}${match.delta} Elo</small></div>
-        <span class="result-badge">${blueWon ? "B" : "R"}</span>
-        <div class="team-names"><strong>${escapeHtml(playerNames(match.red)) || "Unknown"}</strong><small>${blueWon ? "−" : "+"}${match.delta} Elo</small></div>
+    const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(match.date));
+    const time = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(match.date));
+    const sourceLabel = match.source === "rofl" ? "Replay import" : "Manual result";
+    const technical = [match.gameVersion ? `Patch ${match.gameVersion}` : null, match.durationSeconds ? formatDuration(match.durationSeconds) : null, match.gameId ? `ID ${match.gameId}` : null].filter(Boolean).join(" · ");
+    return `<article class="history-match-card">
+      <header class="history-match-head">
+        <div><span class="history-game-number">Game ${String(gameNumber).padStart(2, "0")}</span><time>${escapeHtml(date)} · ${escapeHtml(time)}</time></div>
+        <div class="history-match-badges"><span class="source-badge ${match.source === "rofl" ? "replay" : "manual"}">${sourceLabel}</span>${match.updatedAt ? '<span class="source-badge edited">Edited</span>' : ""}</div>
+      </header>
+      <div class="history-match-body">
+        <section class="history-team blue ${blueWon ? "winner" : "loser"}">
+          <div class="history-team-heading"><span><i></i> Blue team</span><strong>${blueWon ? "Victory" : "Defeat"}</strong></div>
+          <div class="history-roster">${matchRosterMarkup(match, "blue") || '<span class="roster-player muted">No roster saved</span>'}</div>
+          <span class="history-elo ${blueWon ? "positive" : "negative"}">Base ${blueWon ? "+" : "−"}${match.delta} Elo</span>
+        </section>
+        <div class="history-versus"><small>Result</small><strong>${blueWon ? "B" : "R"}</strong><span>WIN</span></div>
+        <section class="history-team red ${blueWon ? "loser" : "winner"}">
+          <div class="history-team-heading"><span><i></i> Red team</span><strong>${blueWon ? "Defeat" : "Victory"}</strong></div>
+          <div class="history-roster">${matchRosterMarkup(match, "red") || '<span class="roster-player muted">No roster saved</span>'}</div>
+          <span class="history-elo ${blueWon ? "negative" : "positive"}">Base ${blueWon ? "−" : "+"}${match.delta} Elo</span>
+        </section>
       </div>
-      <div class="match-actions"><span class="edit-hint">Click to edit result</span><span class="match-action-row">${match.replayStats?.length ? `<button class="stats-button" data-view-replay="${escapeHtml(match.id)}" type="button">View stats</button>` : ""}<button class="delete-match" data-delete-match="${escapeHtml(match.id)}" type="button">Remove</button></span></div>
+      <div class="history-match-footer">
+        <span>${escapeHtml(technical || "Custom lobby result")}</span>
+        <div>
+          ${match.replayStats?.length ? `<button class="history-action accent" data-view-replay="${escapeHtml(match.id)}" type="button">Full stats</button>` : ""}
+          <button class="history-action" data-edit-match="${escapeHtml(match.id)}" type="button">Edit result</button>
+          <button class="history-action danger" data-delete-match="${escapeHtml(match.id)}" type="button">Remove</button>
+        </div>
+      </div>
     </article>`;
   }).join("");
-  empty.hidden = state.matches.length > 0;
-  byId("viewAllButton").hidden = state.matches.length <= 4;
-  byId("viewAllButton").textContent = visibleMatchCount >= state.matches.length ? "Show less" : "View all";
+  const hasMatches = state.matches.length > 0;
+  empty.querySelector("h3").textContent = hasMatches ? "No matches found" : "No matches logged";
+  empty.querySelector("p").textContent = hasMatches ? "Try another player, champion, or source filter." : "Your first result will show up here.";
+  empty.querySelector("button").hidden = hasMatches;
+  empty.hidden = matches.length > 0;
+  list.hidden = matches.length === 0;
 }
 
 function render() {
@@ -345,6 +439,7 @@ function render() {
   document.title = `${state.settings.leagueName} — Custom Game Elo`;
   $(".brand strong").textContent = state.settings.leagueName;
   byId("seasonLabel").textContent = String(state.settings.season).padStart(2, "0");
+  byId("historySeasonLabel").textContent = String(state.settings.season).padStart(2, "0");
   byId("leagueNameInput").value = state.settings.leagueName;
   byId("seasonInput").value = state.settings.season;
   byId("kFactorInput").value = String(state.settings.kFactor);
@@ -353,6 +448,24 @@ function render() {
   renderChampionPanel(championUsage);
   renderHistory();
   hydrateChampionAssets();
+}
+
+function updatePageRoute() {
+  const requested = window.location.hash.slice(1);
+  const activePage = requested === "matches" ? "matches" : "ladder";
+  document.querySelectorAll("[data-page-view]").forEach((page) => {
+    page.hidden = page.dataset.pageView !== activePage;
+  });
+  document.querySelectorAll("[data-page-target]").forEach((link) => {
+    const active = link.dataset.pageTarget === activePage;
+    link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+  if (requested === "ladder" || requested === "matches") {
+    requestAnimationFrame(() => window.scrollTo(0, 0));
+    setTimeout(() => window.scrollTo(0, 0), 60);
+  }
 }
 
 function renderRiotPlayers() {
@@ -403,17 +516,12 @@ function rebuildRecentForm() {
 function applyMatchResult(match, direction = 1) {
   const winningIds = match.winner === "blue" ? match.blue : match.red;
   const losingIds = match.winner === "blue" ? match.red : match.blue;
-  winningIds.forEach((id) => {
+  [...winningIds, ...losingIds].forEach((id) => {
     const player = playerById(id);
     if (!player) return;
-    player.elo += match.delta * direction;
-    player.wins = Math.max(0, player.wins + direction);
-  });
-  losingIds.forEach((id) => {
-    const player = playerById(id);
-    if (!player) return;
-    player.elo = Math.max(0, player.elo - match.delta * direction);
-    player.losses = Math.max(0, player.losses + direction);
+    player.elo = Math.max(0, player.elo + playerMatchDelta(match, id) * direction);
+    if (winningIds.includes(id)) player.wins = Math.max(0, player.wins + direction);
+    else player.losses = Math.max(0, player.losses + direction);
   });
 }
 
@@ -591,7 +699,7 @@ function importPendingReplay(event) {
     delete metrics.replayKey;
     return { ...metrics, trackerPlayerId: trackerIds[index] };
   });
-  const match = {
+  const match = applyPerformanceElo({
     id: replay.gameId ? `rofl-${replay.gameId}` : `rofl-${Date.now()}`,
     gameId: replay.gameId,
     gameVersion: replay.gameVersion,
@@ -603,13 +711,13 @@ function importPendingReplay(event) {
     winner,
     delta,
     replayStats,
-  };
+  });
   applyMatchResult(match, 1);
   state.matches.unshift(match);
   rebuildRecentForm();
   saveState();
   byId("replayDialog").close();
-  showToast(`Replay imported · ${replay.participants.length} players · ${delta} Elo moved`);
+  showToast(`Replay imported · performance Elo applied · base ${delta}`);
   pendingReplay = null;
 }
 
@@ -618,10 +726,10 @@ function openReplayStats(matchId) {
   if (!match?.replayStats?.length) return;
   const rows = [...match.replayStats].sort((a, b) => (a.side === b.side ? 0 : a.side === "blue" ? -1 : 1));
   byId("replayStatsContent").innerHTML = `
-    <p class="replay-stats-summary">${match.gameId ? `Game ${escapeHtml(match.gameId)} · ` : ""}${escapeHtml(match.gameVersion || "Unknown patch")} · ${escapeHtml(formatDuration(match.durationSeconds))}. These values were read from the uploaded replay; the original file was not stored.</p>
+    <p class="replay-stats-summary">${match.gameId ? `Game ${escapeHtml(match.gameId)} · ` : ""}${escapeHtml(match.gameVersion || "Unknown patch")} · ${escapeHtml(formatDuration(match.durationSeconds))}. ${match.eloModel === "performance-v1" ? "Elo includes the player's capped performance adjustment." : "This match used the original equal team Elo model."} The original replay file was not stored.</p>
     <div class="replay-stats-scroll"><table class="replay-stats-table">
-      <thead><tr><th>Team</th><th>Player</th><th>Champion</th><th class="num">K / D / A</th><th class="num">CS</th><th class="num">Gold</th><th class="num">Damage</th><th class="num">Vision</th></tr></thead>
-      <tbody>${rows.map((stat, index) => `<tr class="${index > 0 && rows[index - 1].side !== stat.side ? "side-divider" : ""}"><td>${stat.side === "blue" ? "Blue" : "Red"}</td><td class="stat-player">${escapeHtml(playerById(stat.trackerPlayerId)?.name || stat.riotId || stat.displayName)}</td><td><span class="stat-champion">${championIconMarkup(stat.champion, "small")}<span data-champion-label="${escapeHtml(stat.champion)}">${escapeHtml(stat.champion)}</span></span></td><td class="num">${stat.kills} / ${stat.deaths} / ${stat.assists}</td><td class="num">${stat.cs}</td><td class="num">${formatCompactNumber(stat.gold)}</td><td class="num">${formatCompactNumber(stat.damage)}</td><td class="num">${stat.vision}</td></tr>`).join("")}</tbody>
+      <thead><tr><th>Team</th><th>Player</th><th>Champion</th><th class="num">K / D / A</th><th class="num">CS</th><th class="num">Gold</th><th class="num">Damage</th><th class="num">Vision</th><th class="num">Elo</th></tr></thead>
+      <tbody>${rows.map((stat, index) => { const eloDelta = playerMatchDelta(match, stat.trackerPlayerId); return `<tr class="${index > 0 && rows[index - 1].side !== stat.side ? "side-divider" : ""}"><td>${stat.side === "blue" ? "Blue" : "Red"}</td><td class="stat-player">${escapeHtml(playerById(stat.trackerPlayerId)?.name || stat.riotId || stat.displayName)}</td><td><span class="stat-champion">${championIconMarkup(stat.champion, "small")}<span data-champion-label="${escapeHtml(stat.champion)}">${escapeHtml(stat.champion)}</span></span></td><td class="num">${stat.kills} / ${stat.deaths} / ${stat.assists}</td><td class="num">${stat.cs}</td><td class="num">${formatCompactNumber(stat.gold)}</td><td class="num">${formatCompactNumber(stat.damage)}</td><td class="num">${stat.vision}</td><td class="num stat-elo ${eloDelta >= 0 ? "positive" : "negative"}">${formatSignedElo(eloDelta)}</td></tr>`; }).join("")}</tbody>
     </table></div>`;
   openDialog("replayStatsDialog");
   hydrateChampionAssets();
@@ -638,7 +746,17 @@ function recordMatch(event) {
   const previousMatch = editingMatchId ? state.matches.find((item) => item.id === editingMatchId) : null;
   if (previousMatch) applyMatchResult(previousMatch, -1);
   const delta = calculateMatchDelta(blue, red, winner);
-  const updatedMatch = { ...previousMatch, id: previousMatch?.id || `m-${Date.now()}`, date: previousMatch?.date || new Date().toISOString(), updatedAt: previousMatch ? new Date().toISOString() : undefined, blue, red, winner, delta };
+  let updatedMatch = { ...previousMatch, id: previousMatch?.id || `m-${Date.now()}`, date: previousMatch?.date || new Date().toISOString(), updatedAt: previousMatch ? new Date().toISOString() : undefined, blue, red, winner, delta };
+  if (previousMatch?.eloModel === "performance-v1") {
+    const replayStats = previousMatch.replayStats.map((stat) => ({ ...stat, side: blue.includes(stat.trackerPlayerId) ? "blue" : red.includes(stat.trackerPlayerId) ? "red" : stat.side }));
+    const statPlayerIds = new Set(replayStats.map((stat) => stat.trackerPlayerId));
+    if ([...blue, ...red].every((id) => statPlayerIds.has(id))) updatedMatch = applyPerformanceElo({ ...updatedMatch, replayStats });
+    else {
+      delete updatedMatch.playerDeltas;
+      delete updatedMatch.performanceModifiers;
+      delete updatedMatch.eloModel;
+    }
+  }
   applyMatchResult(updatedMatch, 1);
   if (previousMatch) state.matches = state.matches.map((item) => item.id === previousMatch.id ? updatedMatch : item);
   else state.matches.unshift(updatedMatch);
@@ -662,6 +780,8 @@ function removeMatch(matchId) {
 byId("openPlayerButton").addEventListener("click", () => openDialog("playerDialog"));
 byId("openMatchButton").addEventListener("click", () => openMatchEditor());
 byId("openReplayButton").addEventListener("click", openReplayImporter);
+byId("openMatchFromHistoryButton").addEventListener("click", () => openMatchEditor());
+byId("openReplayFromHistoryButton").addEventListener("click", openReplayImporter);
 byId("settingsButton").addEventListener("click", () => openDialog("settingsDialog"));
 byId("riotButton").addEventListener("click", () => {
   if (!state.players.length) { openDialog("playerDialog"); showToast("Add a player before attaching a Riot ID"); return; }
@@ -674,6 +794,7 @@ document.addEventListener("click", (event) => {
   const close = event.target.closest("[data-close]");
   if (close) byId(close.dataset.close).close();
   if (event.target.closest('[data-action="add-player"]')) openDialog("playerDialog");
+  if (event.target.closest('[data-action="record-match"]')) openMatchEditor();
   const replayStatsButton = event.target.closest("[data-view-replay]");
   if (replayStatsButton) {
     event.stopPropagation();
@@ -686,13 +807,8 @@ document.addEventListener("click", (event) => {
     if (confirm("Remove this result and reverse its Elo change?")) removeMatch(deleteButton.dataset.deleteMatch);
     return;
   }
-  const matchItem = event.target.closest("[data-edit-match]");
-  if (matchItem) openMatchEditor(matchItem.dataset.editMatch);
-});
-
-document.addEventListener("keydown", (event) => {
-  const matchItem = event.target.closest?.("[data-edit-match]");
-  if (matchItem && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openMatchEditor(matchItem.dataset.editMatch); }
+  const matchEditButton = event.target.closest("[data-edit-match]");
+  if (matchEditButton) openMatchEditor(matchEditButton.dataset.editMatch);
 });
 
 document.addEventListener("change", (event) => {
@@ -744,17 +860,25 @@ byId("riotForm").addEventListener("submit", (event) => {
   showToast(`Riot ID attached to ${player.name}`);
 });
 
-byId("viewAllButton").addEventListener("click", () => { visibleMatchCount = visibleMatchCount >= state.matches.length ? 4 : state.matches.length; renderHistory(); });
 byId("playerSearchInput").addEventListener("input", (event) => {
   playerSearchQuery = event.target.value.trim().toLowerCase();
   const championUsage = buildChampionUsage();
   renderStandings([...state.players].sort((a, b) => b.elo - a.elo || a.name.localeCompare(b.name)), championUsage.byPlayer);
   hydrateChampionAssets();
 });
-document.querySelectorAll(".main-nav a").forEach((link) => link.addEventListener("click", () => {
-  document.querySelectorAll(".main-nav a").forEach((item) => item.classList.remove("active"));
-  link.classList.add("active");
+byId("matchSearchInput").addEventListener("input", (event) => {
+  matchSearchQuery = event.target.value.trim().toLowerCase();
+  renderHistory();
+  hydrateChampionAssets();
+});
+document.querySelectorAll("[data-match-filter]").forEach((button) => button.addEventListener("click", () => {
+  matchSourceFilter = button.dataset.matchFilter;
+  document.querySelectorAll("[data-match-filter]").forEach((item) => item.classList.toggle("active", item === button));
+  renderHistory();
+  hydrateChampionAssets();
 }));
+window.addEventListener("hashchange", updatePageRoute);
+window.addEventListener("load", updatePageRoute, { once: true });
 byId("clearDataButton").addEventListener("click", () => {
   if (!confirm("Reset the entire league? This clears every player and match from this browser.")) return;
   state = { settings: { leagueName: "SID CUSTOMI", season: 1, kFactor: 32 }, players: [], matches: [] };
@@ -762,4 +886,5 @@ byId("clearDataButton").addEventListener("click", () => {
 });
 
 render();
+updatePageRoute();
 hydrateFromCloud();

@@ -26,13 +26,13 @@
         <span class="save-state" id="syncState">Connecting…</span>
       </div>
       <div class="masthead">
-        <a class="brand" href="#top" aria-label="SID CUSTOMI home">
+        <a class="brand" href="#ladder" aria-label="SID CUSTOMI home">
           <span class="brand-mark" aria-hidden="true">SC</span>
           <span><strong>SID CUSTOMI</strong><small>League custom games</small></span>
         </a>
         <nav class="main-nav" aria-label="Primary navigation">
-          <a class="active" href="#ladder">Ladder</a>
-          <a href="#matches">Matches</a>
+          <a class="active" href="#ladder" data-page-target="ladder">Ladder</a>
+          <a href="#matches" data-page-target="matches">Matches</a>
           <button id="riotButton" type="button">Riot ID</button>
           <button id="settingsButton" type="button">Settings</button>
         </nav>
@@ -40,6 +40,7 @@
     </header>
 
     <main class="shell">
+      <section class="page-view" id="ladderPage" data-page-view="ladder">
       <section class="league-heading">
         <div>
           <span class="eyebrow">Friends league / EU custom lobby</span>
@@ -72,7 +73,7 @@
       </section>
 
       <section class="dashboard-grid">
-        <article class="panel standings-panel" id="ladder">
+        <article class="panel standings-panel">
           <div class="panel-heading">
             <div><span class="kicker">Season table</span><h2>Player standings</h2></div>
             <button class="secondary-button" id="openPlayerButton" type="button">＋ Add player</button>
@@ -107,16 +108,52 @@
           </div>
         </article>
 
-        <aside class="panel history-panel" id="matches">
-          <div class="panel-heading compact">
-            <div><span class="kicker">Result log</span><h2>Match history</h2></div>
-            <button class="text-button" id="viewAllButton" type="button">View all</button>
+      </section>
+      </section>
+
+      <section class="page-view matches-page" id="matchesPage" data-page-view="matches" hidden>
+        <section class="league-heading matches-heading">
+          <div>
+            <span class="eyebrow">Season <span id="historySeasonLabel">01</span> / complete result archive</span>
+            <h1>Match history</h1>
+            <p>Review every lobby, inspect replay stats, and correct results without digging through the ladder.</p>
           </div>
-          <div id="matchHistory" class="match-list"></div>
-          <div class="empty-state small" id="matchesEmpty" hidden>
+          <div class="league-actions">
+            <button class="secondary-button import-button" id="openReplayFromHistoryButton" type="button">Import .rofl</button>
+            <button class="primary-button" id="openMatchFromHistoryButton" type="button"><span class="plus">＋</span> Record match</button>
+          </div>
+        </section>
+
+        <section class="history-overview" aria-label="Match history overview">
+          <article><span>Total matches</span><strong id="historyTotal">0</strong><small>Current season</small></article>
+          <article><span>Replay imports</span><strong id="historyReplays">0</strong><small>With full stats</small></article>
+          <article><span>Biggest swing</span><strong id="historyBiggestSwing">—</strong><small>Single match Elo</small></article>
+          <article><span>Last played</span><strong id="historyLastPlayed">—</strong><small id="historyLastPlayedMeta">No matches yet</small></article>
+        </section>
+
+        <div class="elo-model-note">
+          <strong>Performance Elo</strong>
+          <span>New replay imports combine the team result with a capped individual adjustment. Manual and older matches keep their original equal team Elo.</span>
+        </div>
+
+        <article class="panel history-page-panel">
+          <div class="history-toolbar">
+            <label class="search-field history-search">
+              <span aria-hidden="true">⌕</span>
+              <input id="matchSearchInput" type="search" autocomplete="off" placeholder="Search player, champion or game ID…" aria-label="Search match history" />
+            </label>
+            <div class="history-filter-group" role="group" aria-label="Filter match source">
+              <button class="active" type="button" data-match-filter="all">All</button>
+              <button type="button" data-match-filter="rofl">Replays</button>
+              <button type="button" data-match-filter="manual">Manual</button>
+            </div>
+          </div>
+          <div id="matchHistory" class="match-archive-list"></div>
+          <div class="empty-state history-empty" id="matchesEmpty" hidden>
             <span>⚔</span><h3>No matches logged</h3><p>Your first result will show up here.</p>
+            <button class="secondary-button" type="button" data-action="record-match">Record the first match</button>
           </div>
-        </aside>
+        </article>
       </section>
 
       <footer>
@@ -208,6 +245,7 @@
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script src="./rofl-parser.js"></script>
+    <script src="./performance-elo.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>
