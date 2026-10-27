@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0d0e" />
+    <meta
+      name="description"
+      content="Track League custom games, player form, and a shared Elo ladder."
+    />
+    <title>SID CUSTOMI — Custom Game Elo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./theme.css" />
+  </head>
+  <body>
+    <header class="shell site-header" id="top">
+      <div class="season-strip">
+        <span class="season-chip">Season <strong id="seasonLabel">01</strong></span>
+        <span class="season-status"><i></i> Live custom ladder</span>
+        <span class="save-state" id="syncState">Connecting…</span>
+      </div>
+      <div class="masthead">
+        <a class="brand" href="#top" aria-label="SID CUSTOMI home">
+          <span class="brand-mark" aria-hidden="true">SC</span>
+          <span><strong>SID CUSTOMI</strong><small>League custom games</small></span>
+        </a>
+        <nav class="main-nav" aria-label="Primary navigation">
+          <a class="active" href="#ladder">Ladder</a>
+          <a href="#matches">Matches</a>
+          <button id="riotButton" type="button">Riot ID</button>
+          <button id="settingsButton" type="button">Settings</button>
+        </nav>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="league-heading">
+        <div>
+          <span class="eyebrow">Friends league / EU custom lobby</span>
+          <h1>ELO Ladder</h1>
+          <p>Every recorded custom updates the table. Click a match to correct the result.</p>
+        </div>
+        <button class="primary-button" id="openMatchButton" type="button">
+          <span class="plus">＋</span> Record match
+        </button>
+      </section>
+
+      <section class="stats-grid" aria-label="League overview">
+        <article class="stat-card rank-stat">
+          <div><span>Top rated</span><strong id="leaderName">—</strong><small id="leaderMeta">Add your first players</small></div>
+        </article>
+        <article class="stat-card">
+          <div><span>Best form</span><strong id="formName">—</strong><small id="formMeta">No games yet</small></div>
+        </article>
+        <article class="stat-card">
+          <div><span>Rated matches</span><strong id="gamesPlayed">0</strong><small id="gamesMeta">Current season</small></div>
+        </article>
+        <article class="stat-card">
+          <div><span>Players</span><strong id="activePlayers">0</strong><small id="playersMeta">On the ladder</small></div>
+        </article>
+      </section>
+
+      <section class="dashboard-grid">
+        <article class="panel standings-panel" id="ladder">
+          <div class="panel-heading">
+            <div><span class="kicker">Season table</span><h2>Player standings</h2></div>
+            <button class="secondary-button" id="openPlayerButton" type="button">＋ Add player</button>
+          </div>
+          <div class="table-toolbar">
+            <label class="search-field">
+              <span aria-hidden="true">⌕</span>
+              <input id="playerSearchInput" type="search" autocomplete="off" placeholder="Filter by player name…" aria-label="Filter by player name" />
+            </label>
+            <span class="table-note">Rating updates after every result</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>#</th><th>Player</th><th class="num">Rating ↓</th><th class="num hide-mobile">Record</th><th class="num hide-mobile">Win %</th><th class="num">Form</th></tr></thead>
+              <tbody id="standingsBody"></tbody>
+            </table>
+          </div>
+          <div class="empty-state" id="playersEmpty" hidden>
+            <span>◇</span><h3>No challengers yet</h3><p>Add your group to start the ladder.</p>
+            <button class="secondary-button" type="button" data-action="add-player">Add the first player</button>
+          </div>
+        </article>
+
+        <aside class="panel history-panel" id="matches">
+          <div class="panel-heading compact">
+            <div><span class="kicker">Result log</span><h2>Match history</h2></div>
+            <button class="text-button" id="viewAllButton" type="button">View all</button>
+          </div>
+          <div id="matchHistory" class="match-list"></div>
+          <div class="empty-state small" id="matchesEmpty" hidden>
+            <span>⚔</span><h3>No matches logged</h3><p>Your first result will show up here.</p>
+          </div>
+        </aside>
+      </section>
+
+      <footer>
+        <span>SID CUSTOMI</span>
+        <p>Built for customs, rivalries, and questionable team drafts.</p>
+        <button id="clearDataButton" class="text-button danger-text" type="button">Reset league</button>
+        <small>SID CUSTOMI is not endorsed by Riot Games. Riot Games and associated properties are trademarks or registered trademarks of Riot Games, Inc.</small>
+      </footer>
+    </main>
+
+    <dialog id="playerDialog" class="modal">
+      <form method="dialog" id="playerForm">
+        <div class="modal-heading"><div><span class="kicker">New challenger</span><h2>Add a player</h2></div><button class="close-button" value="cancel" type="button" data-close="playerDialog" aria-label="Close">×</button></div>
+        <label>Display name<input id="playerNameInput" maxlength="24" autocomplete="off" placeholder="e.g. JungleDiff" required /></label>
+        <div class="field-row">
+          <label>Starting Elo<input id="playerEloInput" type="number" min="100" max="3000" step="25" value="1000" required /></label>
+          <label>Tag color<select id="playerColorInput"><option value="mint">Mint</option><option value="gold">Gold</option><option value="violet">Violet</option><option value="blue">Blue</option><option value="rose">Rose</option></select></label>
+        </div>
+        <p class="form-error" id="playerError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" value="cancel" type="button" data-close="playerDialog">Cancel</button><button class="primary-button" type="submit">Add to ladder</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="matchDialog" class="modal wide-modal">
+      <form method="dialog" id="matchForm">
+        <div class="modal-heading"><div><span class="kicker" id="matchDialogKicker">Post-game lobby</span><h2 id="matchDialogTitle">Record a match</h2></div><button class="close-button" value="cancel" type="button" data-close="matchDialog" aria-label="Close">×</button></div>
+        <div class="match-builder">
+          <section class="team-box blue-team"><div class="team-title"><span>Blue team</span><label class="winner-toggle"><input type="radio" name="winner" value="blue" checked /> Winner</label></div><div id="blueTeamChoices" class="team-choices"></div><div class="team-rating">Average Elo <strong id="blueAverage">—</strong></div></section>
+          <div class="versus">VS</div>
+          <section class="team-box red-team"><div class="team-title"><span>Red team</span><label class="winner-toggle"><input type="radio" name="winner" value="red" /> Winner</label></div><div id="redTeamChoices" class="team-choices"></div><div class="team-rating">Average Elo <strong id="redAverage">—</strong></div></section>
+        </div>
+        <p class="helper-text">Pick at least one player per team. A player can only appear on one side.</p>
+        <p class="form-error" id="matchError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" value="cancel" type="button" data-close="matchDialog">Cancel</button><button class="primary-button" id="matchSubmitButton" type="submit">Calculate & save</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="settingsDialog" class="modal">
+      <form method="dialog" id="settingsForm">
+        <div class="modal-heading"><div><span class="kicker">League rules</span><h2>Elo settings</h2></div><button class="close-button" value="cancel" type="button" data-close="settingsDialog" aria-label="Close">×</button></div>
+        <label>League name<input id="leagueNameInput" maxlength="32" value="SID CUSTOMI" /></label>
+        <div class="field-row"><label>K-factor<select id="kFactorInput"><option value="16">16 — Calm</option><option value="24">24 — Balanced</option><option value="32">32 — Spicy</option><option value="40">40 — Chaos</option></select></label><label>Season<input id="seasonInput" type="number" min="1" max="99" value="1" /></label></div>
+        <p class="helper-text">Higher K-factor means each result moves ratings more.</p>
+        <div class="modal-actions"><button class="secondary-button" value="cancel" type="button" data-close="settingsDialog">Cancel</button><button class="primary-button" type="submit">Save settings</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="riotDialog" class="modal">
+      <form method="dialog" id="riotForm">
+        <div class="modal-heading"><div><span class="kicker">Player identity</span><h2>Attach Riot ID</h2></div><button class="close-button" value="cancel" type="button" data-close="riotDialog" aria-label="Close">×</button></div>
+        <label>Tracker player<select id="riotPlayerInput" required></select></label>
+        <label class="field-spaced">Riot ID<input id="riotIdInput" maxlength="48" autocomplete="off" placeholder="GameName#TAG" required /></label>
+        <p class="helper-text">This stores the Riot ID with the player record. It does not request a password or sign in to Riot.</p>
+        <p class="form-error" id="riotError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" value="cancel" type="button" data-close="riotDialog">Cancel</button><button class="primary-button" type="submit">Save Riot ID</button></div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>
