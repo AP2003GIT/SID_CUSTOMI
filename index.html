@@ -46,9 +46,14 @@
           <h1>ELO Ladder</h1>
           <p>Every recorded custom updates the table. Click a match to correct the result.</p>
         </div>
-        <button class="primary-button" id="openMatchButton" type="button">
-          <span class="plus">＋</span> Record match
-        </button>
+        <div class="league-actions">
+          <button class="secondary-button import-button" id="openReplayButton" type="button">
+            Import .rofl
+          </button>
+          <button class="primary-button" id="openMatchButton" type="button">
+            <span class="plus">＋</span> Record match
+          </button>
+        </div>
       </section>
 
       <section class="stats-grid" aria-label="League overview">
@@ -159,7 +164,39 @@
       </form>
     </dialog>
 
+    <dialog id="replayDialog" class="modal replay-modal">
+      <form method="dialog" id="replayForm">
+        <div class="modal-heading"><div><span class="kicker">Local replay reader</span><h2>Import a custom game</h2></div><button class="close-button" value="cancel" type="button" data-close="replayDialog" aria-label="Close">×</button></div>
+        <section id="replayUploadView">
+          <label class="replay-dropzone" id="replayDropzone" for="replayFileInput">
+            <input id="replayFileInput" type="file" accept=".rofl,application/octet-stream" hidden />
+            <span class="replay-file-mark" aria-hidden="true">ROFL</span>
+            <strong>Choose a League replay</strong>
+            <small>or drop the .rofl file here</small>
+          </label>
+          <div class="privacy-note"><strong>Local by design.</strong> The replay stays in this browser. Only the reviewed match summary is saved to SID CUSTOMI.</div>
+        </section>
+        <section id="replayReviewView" hidden>
+          <div class="replay-summary" id="replaySummary"></div>
+          <label class="replay-winner-field">Recorded winner<select id="replayWinnerInput"><option value="blue">Blue team</option><option value="red">Red team</option></select></label>
+          <div class="replay-team-grid" id="replayTeamGrid"></div>
+          <button class="text-button replay-change-file" id="changeReplayButton" type="button">Choose another replay</button>
+        </section>
+        <p class="form-error" id="replayError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" value="cancel" type="button" data-close="replayDialog">Cancel</button><button class="primary-button" id="confirmReplayButton" type="submit" hidden>Import match</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="replayStatsDialog" class="modal replay-modal">
+      <div class="dialog-content">
+        <div class="modal-heading"><div><span class="kicker">Replay record</span><h2>Match statistics</h2></div><button class="close-button" type="button" data-close="replayStatsDialog" aria-label="Close">×</button></div>
+        <div id="replayStatsContent"></div>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close="replayStatsDialog">Close</button></div>
+      </div>
+    </dialog>
+
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="./rofl-parser.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

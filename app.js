@@ -36,6 +36,7 @@ let editingMatchId = null;
 let playerSearchQuery = "";
 let cloudHydrated = false;
 let cloudSaveTimer;
+let pendingReplay = null;
 
 const $ = (selector) => document.querySelector(selector);
 const byId = (id) => document.getElementById(id);
@@ -119,6 +120,28 @@ function averageElo(ids) {
   return selected.length ? Math.round(selected.reduce((sum, player) => sum + player.elo, 0) / selected.length) : null;
 }
 
+function normalizedIdentity(value) {
+  return String(value || "").normalize("NFKC").replace(/\s+/g, "").toLowerCase();
+}
+
+function formatDuration(seconds) {
+  if (!seconds) return "Unknown";
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function formatCompactNumber(value) {
+  return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(Number(value) || 0);
+}
+
+function calculateMatchDelta(blue, red, winner) {
+  const blueAvg = averageElo(blue);
+  const redAvg = averageElo(red);
+  const expectedBlue = 1 / (1 + Math.pow(10, (redAvg - blueAvg) / 400));
+  const actualBlue = winner === "blue" ? 1 : 0;
+  return Math.max(1, Math.round(state.settings.kFactor * Math.abs(actualBlue - expectedBlue)));
+}
+
 function renderStats(sorted) {
   const leader = sorted[0];
   const formLeader = [...state.players].sort((a, b) => {
@@ -163,14 +186,15 @@ function renderHistory() {
   list.innerHTML = matches.map((match, index) => {
     const blueWon = match.winner === "blue";
     const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(match.date));
+    const replayLabel = match.source === "rofl" ? " · Replay" : "";
     return `<article class="match-item clickable" data-edit-match="${escapeHtml(match.id)}" role="button" tabindex="0" aria-label="Edit game ${state.matches.length - index}">
-      <div class="match-meta"><span>Game ${String(state.matches.length - index).padStart(2, "0")}${match.updatedAt ? " · Edited" : ""}</span><time>${escapeHtml(date)}</time></div>
+      <div class="match-meta"><span>Game ${String(state.matches.length - index).padStart(2, "0")}${replayLabel}${match.updatedAt ? " · Edited" : ""}</span><time>${escapeHtml(date)}</time></div>
       <div class="match-result">
         <div class="team-names"><strong>${escapeHtml(playerNames(match.blue)) || "Unknown"}</strong><small>${blueWon ? "+" : "−"}${match.delta} Elo</small></div>
         <span class="result-badge">${blueWon ? "B" : "R"}</span>
         <div class="team-names"><strong>${escapeHtml(playerNames(match.red)) || "Unknown"}</strong><small>${blueWon ? "−" : "+"}${match.delta} Elo</small></div>
       </div>
-      <div class="match-actions"><span class="edit-hint">Click to edit result</span><button class="delete-match" data-delete-match="${escapeHtml(match.id)}" type="button">Remove</button></div>
+      <div class="match-actions"><span class="edit-hint">Click to edit result</span><span class="match-action-row">${match.replayStats?.length ? `<button class="stats-button" data-view-replay="${escapeHtml(match.id)}" type="button">View stats</button>` : ""}<button class="delete-match" data-delete-match="${escapeHtml(match.id)}" type="button">Remove</button></span></div>
     </article>`;
   }).join("");
   empty.hidden = state.matches.length > 0;
@@ -273,6 +297,195 @@ function openMatchEditor(matchId = null) {
   openDialog("matchDialog");
 }
 
+function resetReplayImporter() {
+  pendingReplay = null;
+  byId("replayFileInput").value = "";
+  byId("replayUploadView").hidden = false;
+  byId("replayReviewView").hidden = true;
+  byId("confirmReplayButton").hidden = true;
+  byId("replayError").textContent = "";
+}
+
+function openReplayImporter() {
+  resetReplayImporter();
+  openDialog("replayDialog");
+}
+
+function replayPlayerMatch(participant) {
+  const riotIdentity = normalizedIdentity(participant.riotId);
+  const nameIdentity = normalizedIdentity(participant.displayName);
+  return state.players.find((player) => riotIdentity && normalizedIdentity(player.riotId) === riotIdentity)
+    || state.players.find((player) => normalizedIdentity(player.name) === nameIdentity)
+    || null;
+}
+
+function renderReplayReview() {
+  const replay = pendingReplay?.parsed;
+  if (!replay) return;
+  const summary = [
+    ["Match ID", replay.gameId || "Unavailable"],
+    ["Patch", replay.gameVersion || "Unknown"],
+    ["Duration", formatDuration(replay.durationSeconds)],
+    ["Format", replay.format],
+  ];
+  byId("replaySummary").innerHTML = summary.map(([label, value]) => `<div class="replay-summary-item"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  byId("replayWinnerInput").value = replay.winner || "blue";
+
+  const playerOptions = (selectedId) => [
+    `<option value="__new__">Create new ladder player</option>`,
+    ...state.players.map((player) => `<option value="${escapeHtml(player.id)}"${player.id === selectedId ? " selected" : ""}>${escapeHtml(player.name)}${player.riotId ? ` — ${escapeHtml(player.riotId)}` : ""}</option>`),
+  ].join("");
+
+  const teamMarkup = (side) => {
+    const participants = replay.participants.filter((participant) => participant.side === side);
+    return `<section class="replay-preview-team ${side}">
+      <div class="replay-preview-title"><span>${side === "blue" ? "Blue team" : "Red team"}</span><small>${participants.length} players</small></div>
+      ${participants.map((participant) => {
+        const index = replay.participants.indexOf(participant);
+        const matched = replayPlayerMatch(participant);
+        return `<div class="replay-player-row">
+          <div class="replay-player-name"><strong>${escapeHtml(participant.riotId || participant.displayName)}</strong><small>${escapeHtml(participant.champion)}${participant.role ? ` · ${escapeHtml(participant.role)}` : ""}</small></div>
+          <span class="replay-kda">${participant.kills}/${participant.deaths}/${participant.assists}</span>
+          <select data-replay-player="${index}" aria-label="Map ${escapeHtml(participant.displayName)} to a ladder player">${playerOptions(matched?.id)}</select>
+        </div>`;
+      }).join("")}
+    </section>`;
+  };
+
+  byId("replayTeamGrid").innerHTML = teamMarkup("blue") + teamMarkup("red");
+  byId("replayUploadView").hidden = true;
+  byId("replayReviewView").hidden = false;
+  byId("confirmReplayButton").hidden = false;
+}
+
+async function readReplayFile(file) {
+  const error = byId("replayError");
+  error.textContent = "";
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith(".rofl")) {
+    error.textContent = "Choose a .rofl file downloaded by the League client.";
+    return;
+  }
+
+  try {
+    error.textContent = "Reading replay locally…";
+    const parsed = SidRoflParser.parseRoflBuffer(await file.arrayBuffer(), { filename: file.name });
+    if (parsed.gameId && state.matches.some((match) => String(match.gameId) === String(parsed.gameId))) {
+      throw new Error(`Game ${parsed.gameId} is already in match history.`);
+    }
+    pendingReplay = { parsed, fileDate: file.lastModified ? new Date(file.lastModified).toISOString() : null };
+    renderReplayReview();
+    error.textContent = "";
+  } catch (parseError) {
+    pendingReplay = null;
+    byId("confirmReplayButton").hidden = true;
+    error.textContent = parseError instanceof Error ? parseError.message : "The replay could not be read.";
+  }
+}
+
+function uniquePlayerName(preferredName) {
+  const base = String(preferredName || "Replay player").trim().slice(0, 24) || "Replay player";
+  let candidate = base;
+  let suffix = 2;
+  while (state.players.some((player) => normalizedIdentity(player.name) === normalizedIdentity(candidate))) {
+    const label = ` ${suffix++}`;
+    candidate = `${base.slice(0, 24 - label.length)}${label}`;
+  }
+  return candidate;
+}
+
+function addReplayPlayer(participant) {
+  const colors = ["mint", "gold", "violet", "blue", "rose"];
+  const player = {
+    id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    name: uniquePlayerName(participant.displayName),
+    color: colors[state.players.length % colors.length],
+    elo: 1000,
+    wins: 0,
+    losses: 0,
+    form: [],
+  };
+  if (participant.riotId?.includes("#")) player.riotId = participant.riotId;
+  state.players.push(player);
+  return player;
+}
+
+function importPendingReplay(event) {
+  event.preventDefault();
+  const replay = pendingReplay?.parsed;
+  const error = byId("replayError");
+  if (!replay) { error.textContent = "Choose a replay first."; return; }
+  if (replay.gameId && state.matches.some((match) => String(match.gameId) === String(replay.gameId))) {
+    error.textContent = `Game ${replay.gameId} is already in match history.`;
+    return;
+  }
+  const replayBlueCount = replay.participants.filter((participant) => participant.side === "blue").length;
+  const replayRedCount = replay.participants.filter((participant) => participant.side === "red").length;
+  if (!replayBlueCount || replayBlueCount !== replayRedCount) {
+    error.textContent = "The replay must contain equal, non-empty teams.";
+    return;
+  }
+
+  const selectors = [...document.querySelectorAll("[data-replay-player]")];
+  const selectedExisting = selectors.map((select) => select.value).filter((value) => value !== "__new__");
+  if (new Set(selectedExisting).size !== selectedExisting.length) {
+    error.textContent = "Each replay participant must map to a different ladder player.";
+    return;
+  }
+
+  const trackerIds = replay.participants.map((participant, index) => {
+    const selectedId = document.querySelector(`[data-replay-player="${index}"]`)?.value;
+    return selectedId === "__new__" || !playerById(selectedId) ? addReplayPlayer(participant).id : selectedId;
+  });
+  const blue = replay.participants.map((participant, index) => participant.side === "blue" ? trackerIds[index] : null).filter(Boolean);
+  const red = replay.participants.map((participant, index) => participant.side === "red" ? trackerIds[index] : null).filter(Boolean);
+  if (!blue.length || blue.length !== red.length) {
+    error.textContent = "The replay must contain equal, non-empty teams.";
+    return;
+  }
+
+  const winner = byId("replayWinnerInput").value;
+  const delta = calculateMatchDelta(blue, red, winner);
+  const replayStats = replay.participants.map((participant, index) => {
+    const metrics = { ...participant };
+    delete metrics.replayKey;
+    return { ...metrics, trackerPlayerId: trackerIds[index] };
+  });
+  const match = {
+    id: replay.gameId ? `rofl-${replay.gameId}` : `rofl-${Date.now()}`,
+    gameId: replay.gameId,
+    gameVersion: replay.gameVersion,
+    durationSeconds: replay.durationSeconds,
+    date: replay.playedAt || pendingReplay.fileDate || new Date().toISOString(),
+    source: "rofl",
+    blue,
+    red,
+    winner,
+    delta,
+    replayStats,
+  };
+  applyMatchResult(match, 1);
+  state.matches.unshift(match);
+  rebuildRecentForm();
+  saveState();
+  byId("replayDialog").close();
+  showToast(`Replay imported · ${replay.participants.length} players · ${delta} Elo moved`);
+  pendingReplay = null;
+}
+
+function openReplayStats(matchId) {
+  const match = state.matches.find((item) => item.id === matchId);
+  if (!match?.replayStats?.length) return;
+  const rows = [...match.replayStats].sort((a, b) => (a.side === b.side ? 0 : a.side === "blue" ? -1 : 1));
+  byId("replayStatsContent").innerHTML = `
+    <p class="replay-stats-summary">${match.gameId ? `Game ${escapeHtml(match.gameId)} · ` : ""}${escapeHtml(match.gameVersion || "Unknown patch")} · ${escapeHtml(formatDuration(match.durationSeconds))}. These values were read from the uploaded replay; the original file was not stored.</p>
+    <div class="replay-stats-scroll"><table class="replay-stats-table">
+      <thead><tr><th>Team</th><th>Player</th><th>Champion</th><th class="num">K / D / A</th><th class="num">CS</th><th class="num">Gold</th><th class="num">Damage</th><th class="num">Vision</th></tr></thead>
+      <tbody>${rows.map((stat, index) => `<tr class="${index > 0 && rows[index - 1].side !== stat.side ? "side-divider" : ""}"><td>${stat.side === "blue" ? "Blue" : "Red"}</td><td class="stat-player">${escapeHtml(playerById(stat.trackerPlayerId)?.name || stat.riotId || stat.displayName)}</td><td>${escapeHtml(stat.champion)}</td><td class="num">${stat.kills} / ${stat.deaths} / ${stat.assists}</td><td class="num">${stat.cs}</td><td class="num">${formatCompactNumber(stat.gold)}</td><td class="num">${formatCompactNumber(stat.damage)}</td><td class="num">${stat.vision}</td></tr>`).join("")}</tbody>
+    </table></div>`;
+  openDialog("replayStatsDialog");
+}
+
 function recordMatch(event) {
   event.preventDefault();
   const blue = selectedPlayers("blue");
@@ -283,12 +496,8 @@ function recordMatch(event) {
   if (blue.length !== red.length) { error.textContent = "Use the same number of players on both teams."; return; }
   const previousMatch = editingMatchId ? state.matches.find((item) => item.id === editingMatchId) : null;
   if (previousMatch) applyMatchResult(previousMatch, -1);
-  const blueAvg = averageElo(blue);
-  const redAvg = averageElo(red);
-  const expectedBlue = 1 / (1 + Math.pow(10, (redAvg - blueAvg) / 400));
-  const actualBlue = winner === "blue" ? 1 : 0;
-  const delta = Math.max(1, Math.round(state.settings.kFactor * Math.abs(actualBlue - expectedBlue)));
-  const updatedMatch = { id: previousMatch?.id || `m-${Date.now()}`, date: previousMatch?.date || new Date().toISOString(), updatedAt: previousMatch ? new Date().toISOString() : undefined, blue, red, winner, delta };
+  const delta = calculateMatchDelta(blue, red, winner);
+  const updatedMatch = { ...previousMatch, id: previousMatch?.id || `m-${Date.now()}`, date: previousMatch?.date || new Date().toISOString(), updatedAt: previousMatch ? new Date().toISOString() : undefined, blue, red, winner, delta };
   applyMatchResult(updatedMatch, 1);
   if (previousMatch) state.matches = state.matches.map((item) => item.id === previousMatch.id ? updatedMatch : item);
   else state.matches.unshift(updatedMatch);
@@ -311,6 +520,7 @@ function removeMatch(matchId) {
 
 byId("openPlayerButton").addEventListener("click", () => openDialog("playerDialog"));
 byId("openMatchButton").addEventListener("click", () => openMatchEditor());
+byId("openReplayButton").addEventListener("click", openReplayImporter);
 byId("settingsButton").addEventListener("click", () => openDialog("settingsDialog"));
 byId("riotButton").addEventListener("click", () => {
   if (!state.players.length) { openDialog("playerDialog"); showToast("Add a player before attaching a Riot ID"); return; }
@@ -323,6 +533,12 @@ document.addEventListener("click", (event) => {
   const close = event.target.closest("[data-close]");
   if (close) byId(close.dataset.close).close();
   if (event.target.closest('[data-action="add-player"]')) openDialog("playerDialog");
+  const replayStatsButton = event.target.closest("[data-view-replay]");
+  if (replayStatsButton) {
+    event.stopPropagation();
+    openReplayStats(replayStatsButton.dataset.viewReplay);
+    return;
+  }
   const deleteButton = event.target.closest("[data-delete-match]");
   if (deleteButton) {
     event.stopPropagation();
@@ -355,6 +571,17 @@ byId("playerForm").addEventListener("submit", (event) => {
 });
 
 byId("matchForm").addEventListener("submit", recordMatch);
+byId("replayForm").addEventListener("submit", importPendingReplay);
+byId("replayFileInput").addEventListener("change", (event) => readReplayFile(event.target.files?.[0]));
+byId("changeReplayButton").addEventListener("click", resetReplayImporter);
+const replayDropzone = byId("replayDropzone");
+replayDropzone.addEventListener("dragover", (event) => { event.preventDefault(); replayDropzone.classList.add("dragging"); });
+replayDropzone.addEventListener("dragleave", () => replayDropzone.classList.remove("dragging"));
+replayDropzone.addEventListener("drop", (event) => {
+  event.preventDefault();
+  replayDropzone.classList.remove("dragging");
+  readReplayFile(event.dataTransfer?.files?.[0]);
+});
 byId("settingsForm").addEventListener("submit", (event) => {
   event.preventDefault();
   state.settings = { leagueName: byId("leagueNameInput").value.trim() || "SID CUSTOMI", season: Number(byId("seasonInput").value) || 1, kFactor: Number(byId("kFactorInput").value) || 32 };

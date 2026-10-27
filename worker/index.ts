@@ -5,11 +5,13 @@ import indexHtml from "../index.html?raw";
 import appJs from "../app.js?raw";
 import stylesCss from "../styles.css?raw";
 import themeCss from "../theme.css?raw";
+import roflParserJs from "../rofl-parser.js?raw";
 
 const staticAssets = new Map<string, { body: string; type: string }>([
   ["/app.js", { body: appJs, type: "text/javascript; charset=utf-8" }],
   ["/styles.css", { body: stylesCss, type: "text/css; charset=utf-8" }],
   ["/theme.css", { body: themeCss, type: "text/css; charset=utf-8" }],
+  ["/rofl-parser.js", { body: roflParserJs, type: "text/javascript; charset=utf-8" }],
 ]);
 
 const worker = {
