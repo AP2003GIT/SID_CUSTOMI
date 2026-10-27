@@ -56,6 +56,10 @@ let playerSearchQuery = "";
 let cloudHydrated = false;
 let cloudSaveTimer;
 let pendingReplay = null;
+let championCatalogPromise = null;
+
+const DATA_DRAGON_ROOT = "https://ddragon.leagueoflegends.com";
+const DATA_DRAGON_FALLBACK_VERSION = "16.21.1";
 
 const $ = (selector) => document.querySelector(selector);
 const byId = (id) => document.getElementById(id);
@@ -156,6 +160,96 @@ function formatCompactNumber(value) {
   return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(Number(value) || 0);
 }
 
+function normalizeChampionKey(value) {
+  return String(value || "").normalize("NFKD").replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function championFallback(champion) {
+  const label = String(champion || "?").trim();
+  return label.slice(0, 2).toUpperCase() || "?";
+}
+
+function championIconMarkup(champion, className = "") {
+  return `<span class="champion-icon ${escapeHtml(className)}" data-champion-icon="${escapeHtml(champion)}" aria-hidden="true">${escapeHtml(championFallback(champion))}</span>`;
+}
+
+function loadChampionCatalog() {
+  if (championCatalogPromise) return championCatalogPromise;
+  championCatalogPromise = (async () => {
+    try {
+      const versionsResponse = await fetch(`${DATA_DRAGON_ROOT}/api/versions.json`);
+      const versions = versionsResponse.ok ? await versionsResponse.json() : [];
+      const version = versions[0] || DATA_DRAGON_FALLBACK_VERSION;
+      const championsResponse = await fetch(`${DATA_DRAGON_ROOT}/cdn/${version}/data/en_US/champion.json`);
+      if (!championsResponse.ok) throw new Error(`Champion catalog failed (${championsResponse.status})`);
+      const payload = await championsResponse.json();
+      const byKey = new Map();
+      Object.values(payload.data || {}).forEach((champion) => {
+        [champion.id, champion.name, champion.key].forEach((key) => byKey.set(normalizeChampionKey(key), champion));
+      });
+      return { version, byKey };
+    } catch (error) {
+      console.warn("Champion icons unavailable", error);
+      return { version: DATA_DRAGON_FALLBACK_VERSION, byKey: new Map() };
+    }
+  })();
+  return championCatalogPromise;
+}
+
+async function hydrateChampionAssets() {
+  const catalog = await loadChampionCatalog();
+  document.querySelectorAll("[data-champion-icon]").forEach((container) => {
+    if (container.dataset.hydrated === "true") return;
+    const champion = catalog.byKey.get(normalizeChampionKey(container.dataset.championIcon));
+    if (!champion) return;
+    const image = document.createElement("img");
+    image.src = `${DATA_DRAGON_ROOT}/cdn/${catalog.version}/img/champion/${champion.image.full}`;
+    image.alt = "";
+    image.loading = "lazy";
+    image.addEventListener("error", () => {
+      container.textContent = championFallback(champion.name);
+      container.dataset.hydrated = "failed";
+    }, { once: true });
+    container.replaceChildren(image);
+    container.title = champion.name;
+    container.dataset.hydrated = "true";
+  });
+  document.querySelectorAll("[data-champion-label]").forEach((label) => {
+    const champion = catalog.byKey.get(normalizeChampionKey(label.dataset.championLabel));
+    if (champion) label.textContent = champion.name;
+  });
+}
+
+function buildChampionUsage() {
+  const overall = new Map();
+  const byPlayer = new Map();
+  let recordedPicks = 0;
+  state.matches.forEach((match) => {
+    (match.replayStats || []).forEach((stat) => {
+      const champion = String(stat.champion || "").trim();
+      if (!champion || normalizeChampionKey(champion) === "unknown") return;
+      const won = match.winner === stat.side;
+      recordedPicks += 1;
+      const overallEntry = overall.get(champion) || { champion, games: 0, wins: 0 };
+      overallEntry.games += 1;
+      overallEntry.wins += won ? 1 : 0;
+      overall.set(champion, overallEntry);
+      if (!byPlayer.has(stat.trackerPlayerId)) byPlayer.set(stat.trackerPlayerId, new Map());
+      const playerMap = byPlayer.get(stat.trackerPlayerId);
+      const playerEntry = playerMap.get(champion) || { champion, games: 0, wins: 0 };
+      playerEntry.games += 1;
+      playerEntry.wins += won ? 1 : 0;
+      playerMap.set(champion, playerEntry);
+    });
+  });
+  const sortEntries = (entries) => [...entries].sort((a, b) => b.games - a.games || b.wins - a.wins || a.champion.localeCompare(b.champion));
+  return {
+    recordedPicks,
+    overall: sortEntries(overall.values()),
+    byPlayer: new Map([...byPlayer].map(([playerId, entries]) => [playerId, sortEntries(entries.values())])),
+  };
+}
+
 function calculateMatchDelta(blue, red, winner) {
   const blueAvg = averageElo(blue);
   const redAvg = averageElo(red);
@@ -179,7 +273,7 @@ function renderStats(sorted) {
   byId("activePlayers").textContent = state.players.length;
 }
 
-function renderStandings(sorted) {
+function renderStandings(sorted, championUsage) {
   const body = byId("standingsBody");
   const empty = byId("playersEmpty");
   const filtered = sorted.filter((player) => player.name.toLowerCase().includes(playerSearchQuery));
@@ -188,17 +282,38 @@ function renderStandings(sorted) {
     const latest = player.form[player.form.length - 1];
     const form = player.form.slice(-5);
     const pills = form.length ? form.map((result) => `<span class="form-pill ${result.toLowerCase()}">${result}</span>`).join("") : '<span class="form-dash">—</span>';
+    const championPicks = (championUsage.get(player.id) || []).slice(0, 3);
+    const picks = championPicks.length ? championPicks.map((pick) => `<span class="main-pick" title="${escapeHtml(pick.champion)} · ${pick.games} game${pick.games === 1 ? "" : "s"}">${championIconMarkup(pick.champion, "small")}<small>${pick.games}</small></span>`).join("") : '<span class="form-dash">—</span>';
     return `<tr class="rank-${index + 1}">
       <td class="rank ${index < 3 ? "top" : ""}">${String(index + 1).padStart(2, "0")}</td>
       <td><div class="player-cell"><span class="avatar ${escapeHtml(player.color)}">${escapeHtml(initials(player.name))}</span><span class="player-identity"><span>${escapeHtml(player.name)}</span>${player.riotId ? `<small>${escapeHtml(player.riotId)}</small>` : ""}</span></div></td>
       <td class="num elo">${player.elo}<span class="${latest === "W" ? "trend-up" : latest === "L" ? "trend-down" : ""}">${latest === "W" ? "▲" : latest === "L" ? "▼" : ""}</span></td>
       <td class="num hide-mobile">${player.wins}–${player.losses}</td>
       <td class="num hide-mobile">${winRate(player)}%</td>
+      <td class="hide-mobile"><div class="main-picks">${picks}</div></td>
       <td class="num"><div class="form-pills">${pills}</div></td>
     </tr>`;
-  }).join("") : (sorted.length ? '<tr><td class="no-results" colspan="6">No players match that search.</td></tr>' : "");
+  }).join("") : (sorted.length ? '<tr><td class="no-results" colspan="7">No players match that search.</td></tr>' : "");
   empty.hidden = sorted.length > 0;
   body.parentElement.hidden = sorted.length === 0;
+}
+
+function renderChampionPanel(championUsage) {
+  const grid = byId("championGrid");
+  const empty = byId("championsEmpty");
+  const topChampions = championUsage.overall.slice(0, 10);
+  byId("championCoverage").textContent = `${championUsage.recordedPicks} recorded pick${championUsage.recordedPicks === 1 ? "" : "s"}`;
+  grid.innerHTML = topChampions.map((entry, index) => {
+    const winRateValue = Math.round((entry.wins / entry.games) * 100);
+    return `<article class="champion-card">
+      <span class="champion-rank">${String(index + 1).padStart(2, "0")}</span>
+      ${championIconMarkup(entry.champion, "large")}
+      <div class="champion-card-copy"><strong data-champion-label="${escapeHtml(entry.champion)}">${escapeHtml(entry.champion)}</strong><small>${entry.games} game${entry.games === 1 ? "" : "s"}</small></div>
+      <span class="champion-winrate">${winRateValue}%<small>win</small></span>
+    </article>`;
+  }).join("");
+  grid.hidden = topChampions.length === 0;
+  empty.hidden = topChampions.length > 0;
 }
 
 function renderHistory() {
@@ -226,6 +341,7 @@ function renderHistory() {
 
 function render() {
   const sorted = [...state.players].sort((a, b) => b.elo - a.elo || a.name.localeCompare(b.name));
+  const championUsage = buildChampionUsage();
   document.title = `${state.settings.leagueName} — Custom Game Elo`;
   $(".brand strong").textContent = state.settings.leagueName;
   byId("seasonLabel").textContent = String(state.settings.season).padStart(2, "0");
@@ -233,8 +349,10 @@ function render() {
   byId("seasonInput").value = state.settings.season;
   byId("kFactorInput").value = String(state.settings.kFactor);
   renderStats(sorted);
-  renderStandings(sorted);
+  renderStandings(sorted, championUsage.byPlayer);
+  renderChampionPanel(championUsage);
   renderHistory();
+  hydrateChampionAssets();
 }
 
 function renderRiotPlayers() {
@@ -503,9 +621,10 @@ function openReplayStats(matchId) {
     <p class="replay-stats-summary">${match.gameId ? `Game ${escapeHtml(match.gameId)} · ` : ""}${escapeHtml(match.gameVersion || "Unknown patch")} · ${escapeHtml(formatDuration(match.durationSeconds))}. These values were read from the uploaded replay; the original file was not stored.</p>
     <div class="replay-stats-scroll"><table class="replay-stats-table">
       <thead><tr><th>Team</th><th>Player</th><th>Champion</th><th class="num">K / D / A</th><th class="num">CS</th><th class="num">Gold</th><th class="num">Damage</th><th class="num">Vision</th></tr></thead>
-      <tbody>${rows.map((stat, index) => `<tr class="${index > 0 && rows[index - 1].side !== stat.side ? "side-divider" : ""}"><td>${stat.side === "blue" ? "Blue" : "Red"}</td><td class="stat-player">${escapeHtml(playerById(stat.trackerPlayerId)?.name || stat.riotId || stat.displayName)}</td><td>${escapeHtml(stat.champion)}</td><td class="num">${stat.kills} / ${stat.deaths} / ${stat.assists}</td><td class="num">${stat.cs}</td><td class="num">${formatCompactNumber(stat.gold)}</td><td class="num">${formatCompactNumber(stat.damage)}</td><td class="num">${stat.vision}</td></tr>`).join("")}</tbody>
+      <tbody>${rows.map((stat, index) => `<tr class="${index > 0 && rows[index - 1].side !== stat.side ? "side-divider" : ""}"><td>${stat.side === "blue" ? "Blue" : "Red"}</td><td class="stat-player">${escapeHtml(playerById(stat.trackerPlayerId)?.name || stat.riotId || stat.displayName)}</td><td><span class="stat-champion">${championIconMarkup(stat.champion, "small")}<span data-champion-label="${escapeHtml(stat.champion)}">${escapeHtml(stat.champion)}</span></span></td><td class="num">${stat.kills} / ${stat.deaths} / ${stat.assists}</td><td class="num">${stat.cs}</td><td class="num">${formatCompactNumber(stat.gold)}</td><td class="num">${formatCompactNumber(stat.damage)}</td><td class="num">${stat.vision}</td></tr>`).join("")}</tbody>
     </table></div>`;
   openDialog("replayStatsDialog");
+  hydrateChampionAssets();
 }
 
 function recordMatch(event) {
@@ -628,7 +747,9 @@ byId("riotForm").addEventListener("submit", (event) => {
 byId("viewAllButton").addEventListener("click", () => { visibleMatchCount = visibleMatchCount >= state.matches.length ? 4 : state.matches.length; renderHistory(); });
 byId("playerSearchInput").addEventListener("input", (event) => {
   playerSearchQuery = event.target.value.trim().toLowerCase();
-  renderStandings([...state.players].sort((a, b) => b.elo - a.elo || a.name.localeCompare(b.name)));
+  const championUsage = buildChampionUsage();
+  renderStandings([...state.players].sort((a, b) => b.elo - a.elo || a.name.localeCompare(b.name)), championUsage.byPlayer);
+  hydrateChampionAssets();
 });
 document.querySelectorAll(".main-nav a").forEach((link) => link.addEventListener("click", () => {
   document.querySelectorAll(".main-nav a").forEach((item) => item.classList.remove("active"));
